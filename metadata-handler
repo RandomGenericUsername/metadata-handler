@@ -1,0 +1,725 @@
+#!/bin/bash
+
+# Independent JSON-based metadata system
+# Provides atomic operations for variables, arrays, and objects
+# Requires: jq (JSON processor)
+
+# Set default print_debug if not provided by calling script
+if [[ -z "$print_debug" ]]; then
+    print_debug="echo"
+fi
+
+# Default metadata file path (can be overridden by setting METADATA_JSON)
+METADATA_JSON="${METADATA_JSON:-./metadata.json}"
+
+# ========= CORE OPERATIONS =========
+
+# Initialize JSON file
+init_metadata_json() {
+    local json_dir
+    json_dir="$(dirname "$METADATA_JSON")"
+    
+    # Create directory if needed
+    if [[ ! -d "$json_dir" ]]; then
+        mkdir -p "$json_dir" || {
+            $print_debug "Failed to create metadata directory: $json_dir" -t "error"
+            return 1
+        }
+    fi
+    
+    # Create empty JSON object if file doesn't exist
+    if [[ ! -f "$METADATA_JSON" ]]; then
+        echo '{}' > "$METADATA_JSON" || {
+            $print_debug "Failed to initialize metadata JSON file" -t "error"
+            return 1
+        }
+    fi
+}
+
+# Set a variable
+# Usage: set_json_var "wallpaper.current.path" "/path/to/wallpaper.jpg"
+set_json_var() {
+    local key="$1"
+    local value="$2"
+    
+    if [[ -z "$key" ]]; then
+        $print_debug "Error: Variable key is required" -t "error"
+        return 1
+    fi
+    
+    init_metadata_json || return 1
+    
+    # Convert dot notation to jq path
+    local jq_path=".${key//./\.}"
+    
+    # Atomic update using temporary file
+    local temp_file="${METADATA_JSON}.tmp.$$"
+    
+    if jq --arg val "$value" "$jq_path = \$val" "$METADATA_JSON" > "$temp_file" && mv "$temp_file" "$METADATA_JSON"; then
+        $print_debug "Set $key = $value" -t "debug" --redirect-to-stderr
+        return 0
+    else
+        rm -f "$temp_file"
+        $print_debug "Failed to set variable: $key" -t "error"
+        return 1
+    fi
+}
+
+# Get a variable value
+# Usage: get_json_var "wallpaper.current.path"
+get_json_var() {
+    local key="$1"
+    
+    if [[ -z "$key" ]]; then
+        $print_debug "Error: Variable key is required" -t "error"
+        return 1
+    fi
+    
+    if [[ ! -f "$METADATA_JSON" ]]; then
+        echo ""
+        return 0
+    fi
+    
+    # Convert dot notation to jq path
+    local jq_path=".${key//./\.}"
+    
+    local value
+    value=$(jq -r "$jq_path // empty" "$METADATA_JSON" 2>/dev/null)
+    
+    # Return empty string if null or doesn't exist
+    if [[ "$value" == "null" || -z "$value" ]]; then
+        echo ""
+    else
+        echo "$value"
+    fi
+    
+    return 0
+}
+
+# Check if a variable exists and is not null
+# Usage: has_json_var "wallpaper.current.path"
+has_json_var() {
+    local key="$1"
+    
+    if [[ ! -f "$METADATA_JSON" ]]; then
+        return 1
+    fi
+    
+    local jq_path=".${key//./\.}"
+    local value
+    value=$(jq -r "$jq_path" "$METADATA_JSON" 2>/dev/null)
+    
+    [[ "$value" != "null" && -n "$value" ]]
+}
+
+# Delete a variable
+# Usage: unset_json_var "wallpaper.current.path"
+unset_json_var() {
+    local key="$1"
+    
+    if [[ ! -f "$METADATA_JSON" ]]; then
+        return 0
+    fi
+    
+    local jq_path=".${key//./\.}"
+    local temp_file="${METADATA_JSON}.tmp.$$"
+    
+    if jq "del($jq_path)" "$METADATA_JSON" > "$temp_file" && mv "$temp_file" "$METADATA_JSON"; then
+        $print_debug "Unset variable: $key" -t "debug" --redirect-to-stderr
+        return 0
+    else
+        rm -f "$temp_file"
+        $print_debug "Failed to unset variable: $key" -t "error"
+        return 1
+    fi
+}
+
+# List all variables with a prefix
+# Usage: list_json_vars "wallpaper"
+list_json_vars() {
+    local prefix="$1"
+    
+    if [[ ! -f "$METADATA_JSON" ]]; then
+        return 0
+    fi
+    
+    if [[ -n "$prefix" ]]; then
+        local jq_path=".${prefix//./\.}"
+        jq -r "$jq_path | keys[]? // empty" "$METADATA_JSON" 2>/dev/null | sed "s/^/${prefix}./"
+    else
+        jq -r 'paths(scalars) as $p | $p | join(".")' "$METADATA_JSON" 2>/dev/null
+    fi
+}
+
+# Set multiple variables atomically
+# Usage: set_json_vars "key1=value1" "key2=value2" "key3=value3"
+set_json_vars() {
+    init_metadata_json || return 1
+    
+    local temp_file="${METADATA_JSON}.tmp.$$"
+    cp "$METADATA_JSON" "$temp_file" || {
+        $print_debug "Failed to create temporary file" -t "error"
+        return 1
+    }
+    
+    # Apply all changes to temporary file
+    local failed=false
+    for assignment in "$@"; do
+        local key="${assignment%%=*}"
+        local value="${assignment#*=}"
+        local jq_path=".${key//./\.}"
+        
+        if ! jq --arg val "$value" "$jq_path = \$val" "$temp_file" > "${temp_file}.new" || ! mv "${temp_file}.new" "$temp_file"; then
+            failed=true
+            break
+        fi
+    done
+    
+    if [[ "$failed" == "true" ]]; then
+        rm -f "$temp_file" "${temp_file}.new"
+        $print_debug "Failed to set variables atomically" -t "error"
+        return 1
+    fi
+    
+    # Atomic swap
+    if mv "$temp_file" "$METADATA_JSON"; then
+        $print_debug "Successfully set multiple variables atomically" -t "debug" --redirect-to-stderr
+        return 0
+    else
+        rm -f "$temp_file"
+        $print_debug "Failed to apply changes atomically" -t "error"
+        return 1
+    fi
+}
+
+# Get all variables as key=value pairs
+# Usage: dump_json_vars
+dump_json_vars() {
+    if [[ ! -f "$METADATA_JSON" ]]; then
+        return 0
+    fi
+
+    jq -r 'paths(scalars) as $p | ($p | join(".")) + "=" + (getpath($p) | tostring)' "$METADATA_JSON" 2>/dev/null
+}
+
+# ========= ARRAY OPERATIONS =========
+
+# Set entire array
+# Usage: set_json_array "cache.wallpapers" "/path/1" "/path/2" "/path/3"
+set_json_array() {
+    local key="$1"
+    shift
+    local values=("$@")
+
+    if [[ -z "$key" ]]; then
+        $print_debug "Error: Variable key is required" -t "error"
+        return 1
+    fi
+
+    init_metadata_json || return 1
+
+    local jq_path=".${key//./\.}"
+    local temp_file="${METADATA_JSON}.tmp.$$"
+
+    # Build the jq command to set the array with proper path creation
+    local jq_cmd="jq"
+    local jq_args=""
+    local arg_count=0
+
+    # Add each array value as an argument
+    for value in "${values[@]}"; do
+        jq_args+=" --arg val$arg_count \"$value\""
+        ((arg_count++))
+    done
+
+    # Build the array assignment expression
+    local array_expr="["
+    for ((i=0; i<arg_count; i++)); do
+        if [[ $i -gt 0 ]]; then
+            array_expr+=","
+        fi
+        array_expr+="\$val$i"
+    done
+    array_expr+="]"
+
+    # Use jq to set the array with path creation
+    if eval "$jq_cmd $jq_args '$jq_path = $array_expr' \"\$METADATA_JSON\"" > "$temp_file" && mv "$temp_file" "$METADATA_JSON"; then
+        $print_debug "Set array $key with ${#values[@]} elements" -t "debug" --redirect-to-stderr
+        return 0
+    else
+        rm -f "$temp_file"
+        $print_debug "Failed to set array: $key" -t "error"
+        return 1
+    fi
+}
+
+# Get array as individual lines
+# Usage: get_json_array "cache.wallpapers"
+get_json_array() {
+    local key="$1"
+
+    if [[ -z "$key" ]]; then
+        $print_debug "Error: Variable key is required" -t "error"
+        return 1
+    fi
+
+    if [[ ! -f "$METADATA_JSON" ]]; then
+        return 0
+    fi
+
+    local jq_path=".${key//./\.}"
+    jq -r "$jq_path[]? // empty" "$METADATA_JSON" 2>/dev/null
+}
+
+# Get array length
+# Usage: get_json_array_length "cache.wallpapers"
+get_json_array_length() {
+    local key="$1"
+    local jq_path=".${key//./\.}"
+
+    if [[ ! -f "$METADATA_JSON" ]]; then
+        echo "0"
+        return 0
+    fi
+
+    jq -r "$jq_path | length // 0" "$METADATA_JSON" 2>/dev/null
+}
+
+# Get array element at specific index
+# Usage: get_json_array_element "cache.wallpapers" 0
+get_json_array_element() {
+    local key="$1"
+    local index="$2"
+
+    if [[ -z "$key" || -z "$index" ]]; then
+        $print_debug "Error: Both key and index are required" -t "error"
+        return 1
+    fi
+
+    if [[ ! -f "$METADATA_JSON" ]]; then
+        echo ""
+        return 0
+    fi
+
+    local jq_path=".${key//./\.}[$index]"
+    jq -r "$jq_path // empty" "$METADATA_JSON" 2>/dev/null
+}
+
+# Set array element at specific index
+# Usage: set_json_array_element "cache.wallpapers" 0 "/new/path"
+set_json_array_element() {
+    local key="$1"
+    local index="$2"
+    local value="$3"
+
+    if [[ -z "$key" || -z "$index" || -z "$value" ]]; then
+        $print_debug "Error: Key, index, and value are required" -t "error"
+        return 1
+    fi
+
+    init_metadata_json || return 1
+
+    local jq_path=".${key//./\.}[$index]"
+    local temp_file="${METADATA_JSON}.tmp.$$"
+
+    if jq --arg val "$value" "$jq_path = \$val" "$METADATA_JSON" > "$temp_file" && mv "$temp_file" "$METADATA_JSON"; then
+        $print_debug "Set array element $key[$index] = $value" -t "debug" --redirect-to-stderr
+        return 0
+    else
+        rm -f "$temp_file"
+        $print_debug "Failed to set array element: $key[$index]" -t "error"
+        return 1
+    fi
+}
+
+# Push element to end of array
+# Usage: push_json_array "cache.wallpapers" "/new/path"
+push_json_array() {
+    local key="$1"
+    local value="$2"
+
+    if [[ -z "$key" || -z "$value" ]]; then
+        $print_debug "Error: Both key and value are required" -t "error"
+        return 1
+    fi
+
+    init_metadata_json || return 1
+
+    local jq_path=".${key//./\.}"
+    local temp_file="${METADATA_JSON}.tmp.$$"
+
+    # Initialize as empty array if doesn't exist, then append
+    if jq --arg val "$value" "$jq_path = (($jq_path // []) + [\$val])" "$METADATA_JSON" > "$temp_file" && mv "$temp_file" "$METADATA_JSON"; then
+        $print_debug "Pushed to array $key: $value" -t "debug" --redirect-to-stderr
+        return 0
+    else
+        rm -f "$temp_file"
+        $print_debug "Failed to push to array: $key" -t "error"
+        return 1
+    fi
+}
+
+# Pop element from end of array (returns the popped element)
+# Usage: popped_value=$(pop_json_array "cache.wallpapers")
+pop_json_array() {
+    local key="$1"
+
+    if [[ -z "$key" ]]; then
+        $print_debug "Error: Variable key is required" -t "error"
+        return 1
+    fi
+
+    if [[ ! -f "$METADATA_JSON" ]]; then
+        echo ""
+        return 0
+    fi
+
+    local jq_path=".${key//./\.}"
+    local temp_file="${METADATA_JSON}.tmp.$$"
+
+    # Get the last element
+    local last_element
+    last_element=$(jq -r "$jq_path[-1] // empty" "$METADATA_JSON" 2>/dev/null)
+
+    if [[ -n "$last_element" ]]; then
+        # Remove the last element
+        if jq "$jq_path = ($jq_path[:-1])" "$METADATA_JSON" > "$temp_file" && mv "$temp_file" "$METADATA_JSON"; then
+            echo "$last_element"
+            $print_debug "Popped from array $key: $last_element" -t "debug" --redirect-to-stderr
+            return 0
+        else
+            rm -f "$temp_file"
+            $print_debug "Failed to pop from array: $key" -t "error"
+            return 1
+        fi
+    else
+        echo ""
+        return 0
+    fi
+}
+
+# Unshift element to beginning of array
+# Usage: unshift_json_array "cache.wallpapers" "/new/path"
+unshift_json_array() {
+    local key="$1"
+    local value="$2"
+
+    if [[ -z "$key" || -z "$value" ]]; then
+        $print_debug "Error: Both key and value are required" -t "error"
+        return 1
+    fi
+
+    init_metadata_json || return 1
+
+    local jq_path=".${key//./\.}"
+    local temp_file="${METADATA_JSON}.tmp.$$"
+
+    # Initialize as empty array if doesn't exist, then prepend
+    if jq --arg val "$value" "$jq_path = ([\$val] + ($jq_path // []))" "$METADATA_JSON" > "$temp_file" && mv "$temp_file" "$METADATA_JSON"; then
+        $print_debug "Unshifted to array $key: $value" -t "debug" --redirect-to-stderr
+        return 0
+    else
+        rm -f "$temp_file"
+        $print_debug "Failed to unshift to array: $key" -t "error"
+        return 1
+    fi
+}
+
+# Shift element from beginning of array (returns the shifted element)
+# Usage: shifted_value=$(shift_json_array "cache.wallpapers")
+shift_json_array() {
+    local key="$1"
+
+    if [[ -z "$key" ]]; then
+        $print_debug "Error: Variable key is required" -t "error"
+        return 1
+    fi
+
+    if [[ ! -f "$METADATA_JSON" ]]; then
+        echo ""
+        return 0
+    fi
+
+    local jq_path=".${key//./\.}"
+    local temp_file="${METADATA_JSON}.tmp.$$"
+
+    # Get the first element
+    local first_element
+    first_element=$(jq -r "$jq_path[0] // empty" "$METADATA_JSON" 2>/dev/null)
+
+    if [[ -n "$first_element" ]]; then
+        # Remove the first element
+        if jq "$jq_path = ($jq_path[1:])" "$METADATA_JSON" > "$temp_file" && mv "$temp_file" "$METADATA_JSON"; then
+            echo "$first_element"
+            $print_debug "Shifted from array $key: $first_element" -t "debug" --redirect-to-stderr
+            return 0
+        else
+            rm -f "$temp_file"
+            $print_debug "Failed to shift from array: $key" -t "error"
+            return 1
+        fi
+    else
+        echo ""
+        return 0
+    fi
+}
+
+# Remove element from array by value
+# Usage: remove_json_array_element "cache.wallpapers" "/path/to/remove"
+remove_json_array_element() {
+    local key="$1"
+    local value="$2"
+
+    if [[ -z "$key" || -z "$value" ]]; then
+        $print_debug "Error: Both key and value are required" -t "error"
+        return 1
+    fi
+
+    if [[ ! -f "$METADATA_JSON" ]]; then
+        return 0
+    fi
+
+    local jq_path=".${key//./\.}"
+    local temp_file="${METADATA_JSON}.tmp.$$"
+
+    if jq --arg val "$value" "$jq_path = ($jq_path // [] | map(select(. != \$val)))" "$METADATA_JSON" > "$temp_file" && mv "$temp_file" "$METADATA_JSON"; then
+        $print_debug "Removed from array $key: $value" -t "debug" --redirect-to-stderr
+        return 0
+    else
+        rm -f "$temp_file"
+        $print_debug "Failed to remove from array: $key" -t "error"
+        return 1
+    fi
+}
+
+# Check if array contains element
+# Usage: if contains_json_array_element "cache.wallpapers" "/path"; then ...
+contains_json_array_element() {
+    local key="$1"
+    local value="$2"
+
+    if [[ -z "$key" || -z "$value" ]]; then
+        return 1
+    fi
+
+    if [[ ! -f "$METADATA_JSON" ]]; then
+        return 1
+    fi
+
+    local jq_path=".${key//./\.}"
+    local contains
+    contains=$(jq --arg val "$value" "$jq_path // [] | contains([\$val])" "$METADATA_JSON" 2>/dev/null)
+
+    [[ "$contains" == "true" ]]
+}
+
+# ========= OBJECT OPERATIONS =========
+
+# Set nested object (creates intermediate objects if needed)
+# Usage: set_json_object "wallpaper.current" '{"path": "/path", "name": "name", "effect": "effect"}'
+set_json_object() {
+    local key="$1"
+    local object_json="$2"
+
+    if [[ -z "$key" || -z "$object_json" ]]; then
+        $print_debug "Error: Both key and object JSON are required" -t "error"
+        return 1
+    fi
+
+    init_metadata_json || return 1
+
+    local jq_path=".${key//./\.}"
+    local temp_file="${METADATA_JSON}.tmp.$$"
+
+    if jq --argjson obj "$object_json" "$jq_path = \$obj" "$METADATA_JSON" > "$temp_file" && mv "$temp_file" "$METADATA_JSON"; then
+        $print_debug "Set object $key" -t "debug" --redirect-to-stderr
+        return 0
+    else
+        rm -f "$temp_file"
+        $print_debug "Failed to set object: $key" -t "error"
+        return 1
+    fi
+}
+
+# Get object as JSON
+# Usage: get_json_object "wallpaper.current"
+get_json_object() {
+    local key="$1"
+
+    if [[ -z "$key" ]]; then
+        $print_debug "Error: Variable key is required" -t "error"
+        return 1
+    fi
+
+    if [[ ! -f "$METADATA_JSON" ]]; then
+        echo "{}"
+        return 0
+    fi
+
+    local jq_path=".${key//./\.}"
+    jq -c "$jq_path // {}" "$METADATA_JSON" 2>/dev/null
+}
+
+# Get object keys
+# Usage: get_json_object_keys "wallpaper.current"
+get_json_object_keys() {
+    local key="$1"
+
+    if [[ -z "$key" ]]; then
+        $print_debug "Error: Variable key is required" -t "error"
+        return 1
+    fi
+
+    if [[ ! -f "$METADATA_JSON" ]]; then
+        return 0
+    fi
+
+    local jq_path=".${key//./\.}"
+    jq -r "$jq_path | keys[]? // empty" "$METADATA_JSON" 2>/dev/null
+}
+
+# Merge object (deep merge)
+# Usage: merge_json_object "wallpaper.current" '{"effect": "new_effect", "extra": "value"}'
+merge_json_object() {
+    local key="$1"
+    local merge_json="$2"
+
+    if [[ -z "$key" || -z "$merge_json" ]]; then
+        $print_debug "Error: Both key and merge JSON are required" -t "error"
+        return 1
+    fi
+
+    init_metadata_json || return 1
+
+    local jq_path=".${key//./\.}"
+    local temp_file="${METADATA_JSON}.tmp.$$"
+
+    if jq --argjson merge "$merge_json" "$jq_path = (($jq_path // {}) * \$merge)" "$METADATA_JSON" > "$temp_file" && mv "$temp_file" "$METADATA_JSON"; then
+        $print_debug "Merged object $key" -t "debug" --redirect-to-stderr
+        return 0
+    else
+        rm -f "$temp_file"
+        $print_debug "Failed to merge object: $key" -t "error"
+        return 1
+    fi
+}
+
+# Remove object key
+# Usage: remove_json_object_key "wallpaper.current" "effect"
+remove_json_object_key() {
+    local key="$1"
+    local object_key="$2"
+
+    if [[ -z "$key" || -z "$object_key" ]]; then
+        $print_debug "Error: Both key and object key are required" -t "error"
+        return 1
+    fi
+
+    if [[ ! -f "$METADATA_JSON" ]]; then
+        return 0
+    fi
+
+    local jq_path=".${key//./\.}"
+    local temp_file="${METADATA_JSON}.tmp.$$"
+
+    if jq "del($jq_path.$object_key)" "$METADATA_JSON" > "$temp_file" && mv "$temp_file" "$METADATA_JSON"; then
+        $print_debug "Removed object key $key.$object_key" -t "debug" --redirect-to-stderr
+        return 0
+    else
+        rm -f "$temp_file"
+        $print_debug "Failed to remove object key: $key.$object_key" -t "error"
+        return 1
+    fi
+}
+
+# Check if object has key
+# Usage: if has_json_object_key "wallpaper.current" "effect"; then ...
+has_json_object_key() {
+    local key="$1"
+    local object_key="$2"
+
+    if [[ -z "$key" || -z "$object_key" ]]; then
+        return 1
+    fi
+
+    if [[ ! -f "$METADATA_JSON" ]]; then
+        return 1
+    fi
+
+    local jq_path=".${key//./\.}"
+    local has_key
+    has_key=$(jq -r "$jq_path | has(\"$object_key\")" "$METADATA_JSON" 2>/dev/null)
+
+    [[ "$has_key" == "true" ]]
+}
+
+# ========= UTILITY OPERATIONS =========
+
+# Pretty print JSON (for debugging)
+# Usage: pretty_print_json_metadata
+pretty_print_json_metadata() {
+    if [[ -f "$METADATA_JSON" ]]; then
+        jq '.' "$METADATA_JSON"
+    else
+        echo "{}"
+    fi
+}
+
+# Backup metadata
+# Usage: backup_json_metadata "/path/to/backup.json"
+backup_json_metadata() {
+    local backup_path="$1"
+
+    if [[ -z "$backup_path" ]]; then
+        $print_debug "Error: Backup path is required" -t "error"
+        return 1
+    fi
+
+    if [[ -f "$METADATA_JSON" ]]; then
+        cp "$METADATA_JSON" "$backup_path" || {
+            $print_debug "Failed to backup metadata to: $backup_path" -t "error"
+            return 1
+        }
+        $print_debug "Backed up metadata to: $backup_path" -t "debug" --redirect-to-stderr
+    else
+        echo '{}' > "$backup_path"
+        $print_debug "Created empty backup at: $backup_path" -t "debug" --redirect-to-stderr
+    fi
+
+    return 0
+}
+
+# Restore metadata from backup
+# Usage: restore_json_metadata "/path/to/backup.json"
+restore_json_metadata() {
+    local backup_path="$1"
+
+    if [[ -z "$backup_path" ]]; then
+        $print_debug "Error: Backup path is required" -t "error"
+        return 1
+    fi
+
+    if [[ ! -f "$backup_path" ]]; then
+        $print_debug "Error: Backup file not found: $backup_path" -t "error"
+        return 1
+    fi
+
+    init_metadata_json || return 1
+
+    cp "$backup_path" "$METADATA_JSON" || {
+        $print_debug "Failed to restore metadata from: $backup_path" -t "error"
+        return 1
+    }
+
+    $print_debug "Restored metadata from: $backup_path" -t "debug" --redirect-to-stderr
+    return 0
+}
+
+# Export functions for use in other scripts
+export -f set_json_var get_json_var has_json_var unset_json_var list_json_vars set_json_vars dump_json_vars
+export -f set_json_array get_json_array get_json_array_length get_json_array_element set_json_array_element
+export -f push_json_array pop_json_array unshift_json_array shift_json_array
+export -f remove_json_array_element contains_json_array_element
+export -f set_json_object get_json_object get_json_object_keys merge_json_object
+export -f remove_json_object_key has_json_object_key
+export -f pretty_print_json_metadata backup_json_metadata restore_json_metadata

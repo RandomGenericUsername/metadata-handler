@@ -1,0 +1,33 @@
+{
+  "system": {
+    "screen_size": "1920x1080",
+    "font_family": "FiraCode Nerd Font"
+  },
+  "app": {
+    "status": "enabled",
+    "theme": {
+      "name": "dark",
+      "path": "/themes/dark"
+    },
+    "launch_command": "myapp --theme dark"
+  },
+  "wallpaper": {
+    "current": {
+      "path": "/home/user/wallpapers/mountain.jpg",
+      "name": "mountain",
+      "effect": "new_blur"
+    },
+    "selected": {
+      "path": "/home/user/wallpapers/ocean.jpg",
+      "name": "ocean",
+      "effect": "brightness"
+    }
+  },
+  "cache": {
+    "wallpapers": [
+      "/home/user/wallpapers/mountain.jpg",
+      "/home/user/wallpapers/desert.jpg"
+    ]
+  },
+  "test": {}
+}
