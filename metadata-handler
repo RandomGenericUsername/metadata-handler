@@ -715,11 +715,17 @@ restore_json_metadata() {
     return 0
 }
 
-# Export functions for use in other scripts
-export -f set_json_var get_json_var has_json_var unset_json_var list_json_vars set_json_vars dump_json_vars
-export -f set_json_array get_json_array get_json_array_length get_json_array_element set_json_array_element
-export -f push_json_array pop_json_array unshift_json_array shift_json_array
-export -f remove_json_array_element contains_json_array_element
-export -f set_json_object get_json_object get_json_object_keys merge_json_object
-export -f remove_json_object_key has_json_object_key
-export -f pretty_print_json_metadata backup_json_metadata restore_json_metadata
+# Export functions for use in other scripts (with error handling for compatibility)
+{
+    export -f set_json_var get_json_var has_json_var unset_json_var list_json_vars set_json_vars dump_json_vars
+    export -f set_json_array get_json_array get_json_array_length get_json_array_element set_json_array_element
+    export -f push_json_array pop_json_array unshift_json_array shift_json_array
+    export -f remove_json_array_element contains_json_array_element
+    export -f set_json_object get_json_object get_json_object_keys merge_json_object
+    export -f remove_json_object_key has_json_object_key
+    export -f pretty_print_json_metadata backup_json_metadata restore_json_metadata
+} 2>/dev/null || {
+    # Functions are still available in current shell, just not exported to subshells
+    # This handles environments where export -f may not be supported
+    true
+}
