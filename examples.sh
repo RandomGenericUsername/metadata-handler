@@ -25,7 +25,7 @@ echo "=== BASIC VARIABLE OPERATIONS ==="
 # Set simple variables
 echo "Setting simple variables..."
 set_json_var "system.screen_size" "1920x1080"
-set_json_var "system.font_family" "FiraCode Nerd Font"
+set_json_var "system.font_family" "\"FiraCode Nerd Font\", FontAwesome, nunito"
 set_json_var "app.status" "enabled"
 
 # Get variables

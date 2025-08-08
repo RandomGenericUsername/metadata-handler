@@ -1,6 +1,6 @@
 # JSON Metadata Handler
 
-A robust, independent JSON-based metadata system for bash scripts that provides atomic operations for variables, arrays, and objects.
+A robust, independent JSON-based metadata system for bash scripts that provides atomic operations for variables, arrays, and objects. Uses true nested dot-path semantics (e.g., "a.b.c") via jq getpath/setpath and supports typed values.
 
 ## Features
 
@@ -23,7 +23,7 @@ A robust, independent JSON-based metadata system for bash scripts that provides 
 export METADATA_JSON="/path/to/your/metadata.json"
 
 # Source the system
-source "./json-metadata.sh"
+source "./metadata-handler"
 
 # Set a variable
 set_json_var "app.name" "MyApp"
@@ -140,7 +140,7 @@ restore_json_metadata "/path/to/backup.json"
 ```bash
 # Set custom path before sourcing
 export METADATA_JSON="/custom/path/metadata.json"
-source "./json-metadata.sh"
+source "./metadata-handler"
 ```
 
 ### Custom Debug Function
@@ -148,7 +148,7 @@ source "./json-metadata.sh"
 ```bash
 # Set custom debug function before sourcing
 export print_debug="my_debug_function"
-source "./json-metadata.sh"
+source "./metadata-handler"
 ```
 
 ## Examples
@@ -157,7 +157,7 @@ source "./json-metadata.sh"
 
 ```bash
 #!/bin/bash
-source "./json-metadata.sh"
+source "./metadata-handler"
 
 # Application configuration
 set_json_vars \
